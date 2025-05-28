@@ -1,4 +1,5 @@
 #include "ModelLoader.h"
+#include "Animation.h"
 #include "../Resources/Model.h"
 #include "../Resources/Mesh.h"
 #include "../Resources/Material.h"
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 ModelLoader::ModelLoader()
     : m_generateNormals(true)
@@ -209,11 +211,13 @@ bool ModelLoader::ParseXFileHeader(XFileContext& context)
     context.isBinary = (format == "bin " || format == "bzip");
     context.isCompressed = (format == "tzip" || format == "bzip");
 
-    if (context.isBinary || context.isCompressed)
+    if (context.isCompressed)
     {
-        std::cerr << "ModelLoader: Binary and compressed .X files not supported yet" << std::endl;
+        std::cerr << "ModelLoader: Compressed .X files not supported yet" << std::endl;
         return false;
     }
+
+    std::cout << "ModelLoader: File format - " << (context.isBinary ? "Binary" : "Text") << std::endl;
 
     // Parse float size
     std::string floatSize = context.content.substr(12, 4);
@@ -248,14 +252,24 @@ void ModelLoader::SkipTemplates(XFileContext& context)
 
 std::shared_ptr<Mesh> ModelLoader::ParseMesh(ID3D11Device* device, XFileContext& context, const std::string& basePath)
 {
-    // Expect: Mesh meshName {
-    std::string meshName = ReadToken(context);
-    SkipWhitespace(context);
+    std::string meshName;
 
-    if (ReadChar(context) != '{')
+    if (context.isBinary)
     {
-        std::cerr << "ModelLoader: Expected '{' after Mesh name" << std::endl;
-        return nullptr;
+        meshName = ReadStringBinary(context);
+        // Binary format doesn't use braces, data follows directly
+    }
+    else
+    {
+        // Expect: Mesh meshName {
+        meshName = ReadToken(context);
+        SkipWhitespace(context);
+
+        if (ReadChar(context) != '{')
+        {
+            std::cerr << "ModelLoader: Expected '{' after Mesh name" << std::endl;
+            return nullptr;
+        }
     }
 
     auto mesh = std::make_shared<Mesh>();
@@ -267,8 +281,17 @@ std::shared_ptr<Mesh> ModelLoader::ParseMesh(ID3D11Device* device, XFileContext&
     mesh->SetName(meshName);
 
     // Parse vertex count
-    SkipWhitespace(context);
-    int vertexCount = ReadInt(context);
+    int vertexCount;
+    if (context.isBinary)
+    {
+        vertexCount = static_cast<int>(ReadUInt32Binary(context));
+    }
+    else
+    {
+        SkipWhitespace(context);
+        vertexCount = ReadInt(context);
+    }
+
     if (vertexCount <= 0)
     {
         std::cerr << "ModelLoader: Invalid vertex count: " << vertexCount << std::endl;
@@ -281,25 +304,44 @@ std::shared_ptr<Mesh> ModelLoader::ParseMesh(ID3D11Device* device, XFileContext&
 
     for (int i = 0; i < vertexCount; ++i)
     {
-        SkipWhitespace(context);
-        float x = ReadFloat(context) * m_scaleFactor;
-        SkipChar(context, ';');
-        float y = ReadFloat(context) * m_scaleFactor;
-        SkipChar(context, ';');
-        float z = ReadFloat(context) * m_scaleFactor;
+        float x, y, z;
+
+        if (context.isBinary)
+        {
+            x = ReadFloatBinary(context) * m_scaleFactor;
+            y = ReadFloatBinary(context) * m_scaleFactor;
+            z = ReadFloatBinary(context) * m_scaleFactor;
+        }
+        else
+        {
+            SkipWhitespace(context);
+            x = ReadFloat(context) * m_scaleFactor;
+            SkipChar(context, ';');
+            y = ReadFloat(context) * m_scaleFactor;
+            SkipChar(context, ';');
+            z = ReadFloat(context) * m_scaleFactor;
+
+            if (i < vertexCount - 1)
+            {
+                SkipChar(context, ',');
+            }
+            SkipChar(context, ';');
+        }
 
         positions.push_back(XMFLOAT3(x, y, z));
-
-        if (i < vertexCount - 1)
-        {
-            SkipChar(context, ',');
-        }
-        SkipChar(context, ';');
     }
 
     // Parse face count
-    SkipWhitespace(context);
-    int faceCount = ReadInt(context);
+    int faceCount;
+    if (context.isBinary)
+    {
+        faceCount = static_cast<int>(ReadUInt32Binary(context));
+    }
+    else
+    {
+        SkipWhitespace(context);
+        faceCount = ReadInt(context);
+    }
 
     // Parse faces (indices)
     std::vector<uint32_t> indices;
@@ -860,8 +902,173 @@ void ModelLoader::ParseMeshMaterialList(ID3D11Device* device, XFileContext& cont
 
 void ModelLoader::ParseAnimationSet(XFileContext& context, std::shared_ptr<Model> model)
 {
-    // Animation parsing - would need full implementation
-    SkipObject(context);
+    std::string animationName = ReadToken(context);
+    SkipWhitespace(context);
+    SkipChar(context, '{');
+
+    // Create animation
+    auto animation = std::make_shared<Animation>();
+    animation->Initialize(animationName, 0.0f, 25.0f); // Default values, will be updated
+
+    std::vector<AnimationChannel> channels;
+
+    // Parse animation content
+    while (context.position < context.content.length())
+    {
+        SkipWhitespace(context);
+        if (PeekChar(context) == '}')
+        {
+            ReadChar(context); // consume '}'
+            break;
+        }
+
+        std::string token = ReadToken(context);
+
+        if (token == "Animation")
+        {
+            // Parse individual animation for a bone
+            std::string boneName = ReadToken(context);
+            SkipWhitespace(context);
+            SkipChar(context, '{');
+
+            AnimationChannel channel;
+            channel.boneName = boneName;
+
+            // Parse animation keys
+            while (context.position < context.content.length())
+            {
+                SkipWhitespace(context);
+                if (PeekChar(context) == '}')
+                {
+                    ReadChar(context); // consume '}'
+                    break;
+                }
+
+                std::string keyToken = ReadToken(context);
+
+                if (keyToken == "AnimationKey")
+                {
+                    SkipWhitespace(context);
+                    SkipChar(context, '{');
+
+                    // Read key type (0=rotation, 1=scale, 2=position)
+                    int keyType = ReadInt(context);
+
+                    // Read number of keys
+                    int numKeys = ReadInt(context);
+
+                    for (int i = 0; i < numKeys; ++i)
+                    {
+                        // Read time
+                        float time = ReadFloat(context);
+                        SkipChar(context, ';');
+
+                        // Read number of values
+                        int numValues = ReadInt(context);
+                        SkipChar(context, ';');
+
+                        if (keyType == 2) // Position
+                        {
+                            if (numValues >= 3)
+                            {
+                                float x = ReadFloat(context); SkipChar(context, ',');
+                                float y = ReadFloat(context); SkipChar(context, ',');
+                                float z = ReadFloat(context);
+
+                                AnimationKey<XMVECTOR> key(time, XMVectorSet(x, y, z, 0.0f));
+                                channel.positionKeys.push_back(key);
+                            }
+                        }
+                        else if (keyType == 0) // Rotation (quaternion)
+                        {
+                            if (numValues >= 4)
+                            {
+                                float w = ReadFloat(context); SkipChar(context, ',');
+                                float x = ReadFloat(context); SkipChar(context, ',');
+                                float y = ReadFloat(context); SkipChar(context, ',');
+                                float z = ReadFloat(context);
+
+                                AnimationKey<XMVECTOR> key(time, XMVectorSet(x, y, z, w));
+                                channel.rotationKeys.push_back(key);
+                            }
+                        }
+                        else if (keyType == 1) // Scale
+                        {
+                            if (numValues >= 3)
+                            {
+                                float x = ReadFloat(context); SkipChar(context, ',');
+                                float y = ReadFloat(context); SkipChar(context, ',');
+                                float z = ReadFloat(context);
+
+                                AnimationKey<XMVECTOR> key(time, XMVectorSet(x, y, z, 0.0f));
+                                channel.scaleKeys.push_back(key);
+                            }
+                        }
+
+                        // Skip remaining values and separators
+                        for (int j = 3; j < numValues; ++j)
+                        {
+                            ReadFloat(context);
+                            if (j < numValues - 1) SkipChar(context, ',');
+                        }
+
+                        if (i < numKeys - 1) SkipChar(context, ',');
+                        SkipChar(context, ';');
+                    }
+
+                    SkipChar(context, '}');
+                }
+                else
+                {
+                    SkipObject(context);
+                }
+            }
+
+            if (!channel.positionKeys.empty() || !channel.rotationKeys.empty() || !channel.scaleKeys.empty())
+            {
+                channels.push_back(channel);
+            }
+        }
+        else
+        {
+            SkipObject(context);
+        }
+    }
+
+    // Add channels to animation
+    for (const auto& channel : channels)
+    {
+        animation->AddChannel(channel);
+    }
+
+    // Calculate animation duration
+    float maxTime = 0.0f;
+    for (const auto& channel : channels)
+    {
+        for (const auto& key : channel.positionKeys)
+        {
+            maxTime = std::max(maxTime, key.time);
+        }
+        for (const auto& key : channel.rotationKeys)
+        {
+            maxTime = std::max(maxTime, key.time);
+        }
+        for (const auto& key : channel.scaleKeys)
+        {
+            maxTime = std::max(maxTime, key.time);
+        }
+    }
+
+    if (maxTime > 0.0f)
+    {
+        animation->Initialize(animationName, maxTime, 25.0f);
+        // Note: Would need to add animation to model here
+        // model->AddAnimation(animation);
+
+        std::cout << "ModelLoader: Loaded animation '" << animationName
+                  << "' with duration " << maxTime << " and "
+                  << channels.size() << " channels" << std::endl;
+    }
 }
 
 // Post-processing functions
@@ -936,4 +1143,65 @@ void ModelLoader::OptimizeMeshes(std::shared_ptr<Model> model)
 {
     // Optimize meshes by removing duplicate vertices, etc.
     // This is a placeholder for optimization algorithms
+}
+
+// Binary file reading implementations
+template<typename T>
+T ModelLoader::ReadBinary(XFileContext& context)
+{
+    if (context.position + sizeof(T) > context.content.length())
+    {
+        throw std::runtime_error("ModelLoader: Unexpected end of binary data");
+    }
+
+    T value;
+    std::memcpy(&value, context.content.data() + context.position, sizeof(T));
+    context.position += sizeof(T);
+    return value;
+}
+
+uint16_t ModelLoader::ReadUInt16Binary(XFileContext& context)
+{
+    return ReadBinary<uint16_t>(context);
+}
+
+uint32_t ModelLoader::ReadUInt32Binary(XFileContext& context)
+{
+    return ReadBinary<uint32_t>(context);
+}
+
+float ModelLoader::ReadFloatBinary(XFileContext& context)
+{
+    return ReadBinary<float>(context);
+}
+
+std::string ModelLoader::ReadStringBinary(XFileContext& context)
+{
+    uint32_t length = ReadUInt32Binary(context);
+    if (length == 0) return "";
+
+    if (context.position + length > context.content.length())
+    {
+        throw std::runtime_error("ModelLoader: String length exceeds available data");
+    }
+
+    std::string result(context.content.data() + context.position, length);
+    context.position += length;
+
+    // Skip null terminator if present
+    if (context.position < context.content.length() &&
+        context.content[context.position] == '\0')
+    {
+        context.position++;
+    }
+
+    return result;
+}
+
+ModelLoader::BinaryToken ModelLoader::ReadBinaryToken(XFileContext& context)
+{
+    BinaryToken token;
+    token.type = ReadUInt16Binary(context);
+    token.size = ReadUInt16Binary(context);
+    return token;
 }

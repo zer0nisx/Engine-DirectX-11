@@ -64,12 +64,14 @@ set(GRAPHICS_SOURCES
     Graphics/Shader.cpp
     Graphics/ModelLoader.cpp
     Graphics/PostProcess.cpp
+    Graphics/Animation.cpp
 )
 
 set(GRAPHICS_HEADERS
     Graphics/Shader.h
     Graphics/ModelLoader.h
     Graphics/PostProcess.h
+    Graphics/Animation.h
 )
 
 # Resources subsystem

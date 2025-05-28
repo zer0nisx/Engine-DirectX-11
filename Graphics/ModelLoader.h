@@ -190,6 +190,20 @@ private:
     bool ParseHeader(XFileContext& context);
     bool ParseContent(XFileContext& context, std::shared_ptr<Model> model, ID3D11Device* device);
 
+    // Binary file reading helpers
+    template<typename T> T ReadBinary(XFileContext& context);
+    uint16_t ReadUInt16Binary(XFileContext& context);
+    uint32_t ReadUInt32Binary(XFileContext& context);
+    float ReadFloatBinary(XFileContext& context);
+    std::string ReadStringBinary(XFileContext& context);
+
+    // Binary token reading
+    struct BinaryToken {
+        uint16_t type;
+        uint16_t size;
+    };
+    BinaryToken ReadBinaryToken(XFileContext& context);
+
     // Template parsing
     std::unique_ptr<XFrameData> ParseFrame(XFileContext& context);
     std::unique_ptr<XMeshData> ParseMesh(XFileContext& context);
